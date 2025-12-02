@@ -15,6 +15,8 @@ class SCS_Admin {
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_assets'));
         add_action('wp_ajax_scs_manual_sync', array($this, 'ajax_manual_sync'));
         add_action('wp_ajax_scs_test_connection', array($this, 'ajax_test_connection'));
+        add_action('wp_ajax_nopriv_scs_cron_trigger', array($this, 'ajax_cron_trigger'));
+        add_action('wp_ajax_scs_cron_trigger', array($this, 'ajax_cron_trigger'));
     }
 
     public function add_admin_menu() {
@@ -43,6 +45,14 @@ class SCS_Admin {
         $sanitized['include_variations'] = isset($input['include_variations']) ? true : false;
         $sanitized['include_categories'] = isset($input['include_categories']) ? true : false;
         $sanitized['last_sync'] = isset($input['last_sync']) ? intval($input['last_sync']) : 0;
+
+        // Cron token - generate if empty
+        if (isset($input['cron_token']) && !empty($input['cron_token'])) {
+            $sanitized['cron_token'] = sanitize_text_field($input['cron_token']);
+        } else {
+            $old_settings = get_option('scs_settings');
+            $sanitized['cron_token'] = !empty($old_settings['cron_token']) ? $old_settings['cron_token'] : wp_generate_password(32, false);
+        }
 
         // Reschedule cron if interval changed
         $old_settings = get_option('scs_settings');
@@ -131,6 +141,44 @@ class SCS_Admin {
         } else {
             wp_send_json_error(array('message' => sprintf(__('Error HTTP %d', 'smart-catalog-sync'), $status_code)));
         }
+    }
+
+    public function ajax_cron_trigger() {
+        // Get settings
+        $settings = get_option('scs_settings');
+
+        // Verify token
+        $provided_token = isset($_GET['token']) ? sanitize_text_field($_GET['token']) : '';
+
+        if (empty($provided_token) || empty($settings['cron_token']) || $provided_token !== $settings['cron_token']) {
+            status_header(403);
+            echo json_encode(array(
+                'success' => false,
+                'message' => 'Invalid token'
+            ));
+            exit;
+        }
+
+        // Check if sync is enabled
+        if (empty($settings['sync_enabled'])) {
+            echo json_encode(array(
+                'success' => false,
+                'message' => 'Automatic sync is disabled'
+            ));
+            exit;
+        }
+
+        // Execute sync
+        $sync_engine = new SCS_Sync_Engine();
+        $sync_engine->auto_sync();
+
+        // Return success
+        echo json_encode(array(
+            'success' => true,
+            'message' => 'Sync executed successfully',
+            'timestamp' => current_time('mysql')
+        ));
+        exit;
     }
 
     public function render_admin_page() {
@@ -293,6 +341,68 @@ class SCS_Admin {
                                 >
                                 <span><?php _e('Incluir categorías y etiquetas', 'smart-catalog-sync'); ?></span>
                             </label>
+                        </div>
+                    </div>
+
+                    <!-- Cron Configuration Section -->
+                    <div class="scs-section">
+                        <h2 class="scs-section-title">
+                            <span class="dashicons dashicons-clock"></span>
+                            <?php _e('Configuración de Cron Externo', 'smart-catalog-sync'); ?>
+                        </h2>
+
+                        <p class="scs-description" style="margin-bottom: 20px;">
+                            <?php _e('Si el cron de WordPress está deshabilitado o quieres usar solo este evento, configura un cron job en tu servidor con la URL de abajo:', 'smart-catalog-sync'); ?>
+                        </p>
+
+                        <div class="scs-form-group">
+                            <label for="cron_token" class="scs-label">
+                                <?php _e('Token de Seguridad', 'smart-catalog-sync'); ?>
+                            </label>
+                            <div class="scs-input-group">
+                                <input
+                                    type="text"
+                                    id="cron_token"
+                                    name="scs_settings[cron_token]"
+                                    value="<?php echo esc_attr($settings['cron_token']); ?>"
+                                    class="scs-input"
+                                    readonly
+                                >
+                                <button type="button" id="scs-regenerate-token" class="scs-btn scs-btn-secondary" onclick="if(confirm('¿Regenerar token? Deberás actualizar tu cron job.')){ document.getElementById('cron_token').value = '<?php echo wp_generate_password(32, false); ?>'; }">
+                                    <span class="dashicons dashicons-update"></span>
+                                    <?php _e('Regenerar', 'smart-catalog-sync'); ?>
+                                </button>
+                            </div>
+                            <p class="scs-description"><?php _e('Token único para proteger la URL del cron. Mantenlo en secreto.', 'smart-catalog-sync'); ?></p>
+                        </div>
+
+                        <div class="scs-form-group">
+                            <label class="scs-label">
+                                <?php _e('URL para Cron Job del Servidor', 'smart-catalog-sync'); ?>
+                            </label>
+                            <?php
+                            $cron_url = add_query_arg(array(
+                                'action' => 'scs_cron_trigger',
+                                'token' => $settings['cron_token']
+                            ), admin_url('admin-ajax.php'));
+                            ?>
+                            <div class="scs-input-group">
+                                <input
+                                    type="text"
+                                    id="cron_url"
+                                    value="<?php echo esc_url($cron_url); ?>"
+                                    class="scs-input"
+                                    readonly
+                                >
+                                <button type="button" class="scs-btn scs-btn-secondary" onclick="navigator.clipboard.writeText(document.getElementById('cron_url').value); alert('URL copiada!');">
+                                    <span class="dashicons dashicons-clipboard"></span>
+                                    <?php _e('Copiar', 'smart-catalog-sync'); ?>
+                                </button>
+                            </div>
+                            <p class="scs-description">
+                                <?php _e('Configura tu cron job así (cada 15 minutos):', 'smart-catalog-sync'); ?><br>
+                                <code>*/15 * * * * curl -s "<?php echo esc_url($cron_url); ?>" >/dev/null 2>&1</code>
+                            </p>
                         </div>
                     </div>
 
